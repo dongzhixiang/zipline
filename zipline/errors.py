@@ -435,8 +435,8 @@ class TermInputsNotSpecified(ZiplineError):
 
 class WindowLengthNotSpecified(ZiplineError):
     """
-    Raised if a user attempts to construct a term without specifying inputs and
-    that term does not have class-level default inputs.
+    Raised if a user attempts to construct a term without specifying window
+    length and that term does not have a class-level default window length.
     """
     msg = (
         "{termname} requires a window_length, but no window_length was passed."

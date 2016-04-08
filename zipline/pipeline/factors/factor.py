@@ -1,7 +1,7 @@
 """
 factor.py
 """
-from functools import wraps
+from functools import partial, wraps
 from operator import attrgetter
 from numbers import Number
 
@@ -1130,8 +1130,13 @@ class CustomFactor(PositiveWindowLengthMixin, CustomTermMixin, Factor):
     inputs : iterable, optional
         An iterable of `BoundColumn` instances (e.g. USEquityPricing.close),
         describing the data to load and pass to `self.compute`.  If this
-        argument is passed to the CustomFactor constructor, we look for a
+        argument is not passed to the CustomFactor constructor, we look for a
         class-level attribute named `inputs`.
+    outputs : iterable, optional
+        An iterable of strings which represent the names of each output this
+        factor should compute and return. If this argument is not passed to the
+        CustomFactor constructor, we look for a class-level attribute named
+        `outputs`.
     window_length : int, optional
         Number of rows to pass for each input.  If this argument is not passed
         to the CustomFactor constructor, we look for a class-level attribute
@@ -1164,7 +1169,9 @@ class CustomFactor(PositiveWindowLengthMixin, CustomTermMixin, Factor):
             Column labels for `out` and`inputs`.
         out : np.array[self.dtype, ndim=1]
             Output array of the same shape as `assets`.  `compute` should write
-            its desired return values into `out`.
+            its desired return values into `out`. If multiple outputs are
+            specified, `compute` should write its desired return values into
+            `out.<output_name>` for each output name in `self.outputs`.
         *inputs : tuple of np.array
             Raw data arrays corresponding to the values of `self.inputs`.
 
@@ -1229,8 +1236,67 @@ class CustomFactor(PositiveWindowLengthMixin, CustomTermMixin, Factor):
         # MedianValue.
         median_close10 = MedianValue([USEquityPricing.close], window_length=10)
         median_low15 = MedianValue([USEquityPricing.low], window_length=15)
+
+    A CustomFactor with multiple outputs:
+
+    .. code-block:: python
+
+        class MultipleOutputs(CustomFactor):
+            inputs = [USEquityPricing.close]
+            outputs = ['alpha', 'beta']
+            window_length = N
+
+            def compute(self, today, assets, out, close):
+                computed_alpha, computed_beta = some_function(close)
+                out.alpha[:] = computed_alpha
+                out.beta[:] = computed_beta
+
+        # Each output is returned as its own Factor upon instantiation.
+        alpha, beta = MultipleOutputs()
     '''
     dtype = float64_dtype
+
+    def __getattr__(self, name):
+        if name in self.outputs:
+            return RecarrayFactor(factor=self, attribute=name)
+        else:
+            raise AttributeError(
+                "This factor has no output called '{}'.".format(name)
+            )
+
+    def __iter__(self):
+        if len(self.outputs) < 2:
+            raise ValueError('This factor does not have multiple outputs.')
+        RecarrayFactor_ = partial(RecarrayFactor, self)
+        return iter(map(RecarrayFactor_, self.outputs))
+
+
+class RecarrayFactor(SingleInputMixin, Factor):
+
+    def __new__(cls, factor, attribute):
+        return super(RecarrayFactor, cls).__new__(
+            cls,
+            attribute=attribute,
+            inputs=[factor],
+            window_length=0,
+            mask=factor.mask,
+            dtype=factor.dtype,
+            missing_value=factor.missing_value,
+        )
+
+    def _init(self, attribute, *args, **kwargs):
+        self.attribute = attribute
+        return super(RecarrayFactor, self)._init(*args, **kwargs)
+
+    @classmethod
+    def static_identity(cls, attribute, *args, **kwargs):
+        return (
+            super(RecarrayFactor, cls).static_identity(*args, **kwargs),
+            attribute,
+        )
+
+    def _compute(self, windows, dates, assets, mask):
+        return windows[0][self.attribute]
 
 
 class Latest(LatestMixin, CustomFactor):

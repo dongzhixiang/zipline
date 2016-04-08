@@ -38,19 +38,9 @@ from toolz import merge
 
 from zipline.assets.synthetic import make_rotating_equity_info
 from zipline.lib.adjustment import MULTIPLY
-from zipline.pipeline.loaders.synthetic import PrecomputedLoader
-from zipline.pipeline import Pipeline
-from zipline.pipeline.data import USEquityPricing, DataSet, Column
-from zipline.pipeline.loaders.equity_pricing_loader import (
-    USEquityPricingLoader,
-)
-from zipline.pipeline.loaders.synthetic import (
-    make_daily_bar_data,
-    expected_daily_bar_values_2d,
-)
+from zipline.pipeline import CustomFactor, Pipeline
+from zipline.pipeline.data import Column, DataSet, USEquityPricing
 from zipline.pipeline.engine import SimplePipelineEngine
-from zipline.pipeline.loaders.frame import DataFrameLoader
-from zipline.pipeline import CustomFactor
 from zipline.pipeline.factors import (
     AverageDollarVolume,
     EWMA,
@@ -59,6 +49,15 @@ from zipline.pipeline.factors import (
     ExponentialWeightedMovingStdDev,
     MaxDrawdown,
     SimpleMovingAverage,
+)
+from zipline.pipeline.loaders.equity_pricing_loader import (
+    USEquityPricingLoader,
+)
+from zipline.pipeline.loaders.frame import DataFrameLoader
+from zipline.pipeline.loaders.synthetic import (
+    expected_daily_bar_values_2d,
+    make_daily_bar_data,
+    PrecomputedLoader,
 )
 from zipline.testing import (
     product_upper_triangle,
@@ -110,6 +109,16 @@ class OpenPrice(CustomFactor):
 
     def compute(self, today, assets, out, open):
         out[:] = open
+
+
+class MultipleOutputs(CustomFactor):
+    window_length = 1
+    inputs = [USEquityPricing.open, USEquityPricing.close]
+    outputs = ['open', 'close']
+
+    def compute(self, today, assets, out, open, close):
+        out.open[:] = open
+        out.close[:] = close
 
 
 def assert_multi_index_is_product(testcase, index, *levels):
@@ -509,6 +518,107 @@ class ConstantInputTestCase(WithTradingEnvironment, ZiplineTestCase):
                     data=full(result_shape, const, dtype=float),
                 ),
             )
+
+    def test_factor_with_single_output(self):
+        dates = self.dates[5:10]
+        assets = self.assets
+        num_dates = len(dates)
+        open = USEquityPricing.open
+        open_values = array([self.constants[open]] * num_dates, dtype=float)
+        engine = SimplePipelineEngine(
+            lambda column: self.loader, self.dates, self.asset_finder,
+        )
+
+        single_output = OpenPrice(outputs=['open'])
+        pipeline = Pipeline(columns={'open': single_output.open})
+
+        results = engine.run_pipeline(pipeline, dates[0], dates[-1])
+        output_results = results['open'].unstack()
+        output_expected = {asset: open_values for asset in assets}
+
+        assert_frame_equal(
+            output_results,
+            DataFrame(output_expected, index=dates, columns=assets),
+        )
+
+    def test_factor_with_multiple_outputs(self):
+        dates = self.dates[5:10]
+        assets = self.assets
+        asset_ids = self.asset_ids
+        constants = self.constants
+        num_dates = len(dates)
+        num_assets = len(assets)
+        open = USEquityPricing.open
+        close = USEquityPricing.close
+        engine = SimplePipelineEngine(
+            lambda column: self.loader, self.dates, self.asset_finder,
+        )
+
+        def create_expected_results(expected_value, mask):
+            expected_values = where(mask, expected_value, nan)
+            return DataFrame(expected_values, index=dates, columns=assets)
+
+        multiple_outputs = MultipleOutputs()
+        open_price, close_price = MultipleOutputs()
+
+        # Ensure that both methods of accessing our outputs return the same
+        # things.
+        self.assertIs(open_price, multiple_outputs.open)
+        self.assertIs(close_price, multiple_outputs.close)
+
+        pipeline = Pipeline(
+            columns={'open_price': open_price, 'close_price': close_price},
+        )
+
+        results = engine.run_pipeline(pipeline, dates[0], dates[-1])
+        first_output_results = results['open_price'].unstack()
+        second_output_results = results['close_price'].unstack()
+
+        first_output_expected = create_expected_results(
+            constants[open], full((num_dates, num_assets), True),
+        )
+        second_output_expected = create_expected_results(
+            constants[close], full((num_dates, num_assets), True),
+        )
+
+        assert_frame_equal(first_output_results, first_output_expected)
+        assert_frame_equal(second_output_results, second_output_expected)
+
+        # Now test the same outputs again, but with different masks.
+        alternating_mask = (AssetIDPlusDay() % 2).eq(0)
+        cascading_mask = AssetIDPlusDay() < (asset_ids[-1] + dates[0].day)
+
+        for mask in (cascading_mask, alternating_mask):
+            multiple_outputs = MultipleOutputs(mask=mask)
+            open_price, close_price = MultipleOutputs(mask=mask)
+
+            # Ensure that both methods of accessing our outputs return the same
+            # things.
+            self.assertIs(open_price, multiple_outputs.open)
+            self.assertIs(close_price, multiple_outputs.close)
+
+            pipeline = Pipeline(
+                columns={
+                    'open_price': open_price,
+                    'close_price': close_price,
+                    'mask': mask,
+                },
+            )
+
+            results = engine.run_pipeline(pipeline, dates[0], dates[-1])
+            mask_results = results['mask'].unstack()
+            first_output_results = results['open_price'].unstack()
+            second_output_results = results['close_price'].unstack()
+
+            first_output_expected = create_expected_results(
+                constants[open], mask_results,
+            )
+            second_output_expected = create_expected_results(
+                constants[close], mask_results,
+            )
+
+            assert_frame_equal(first_output_results, first_output_expected)
+            assert_frame_equal(second_output_results, second_output_expected)
 
     def test_loader_given_multiple_columns(self):
 
